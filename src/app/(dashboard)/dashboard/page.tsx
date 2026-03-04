@@ -1,0 +1,407 @@
+"use client";
+
+import { useState, useEffect, useMemo } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Users,
+  Building2,
+  AlertTriangle,
+  Clock,
+  Loader2,
+  Copy,
+  Ban,
+  ShieldAlert,
+  Eye,
+} from "lucide-react";
+import { daysLeft, formatDate, expiryFromStart } from "@/lib/utils";
+
+interface CustomerRow {
+  id: string;
+  name: string;
+  email: string;
+  start_date: string;
+  is_trial?: boolean;
+  is_unknown?: boolean;
+  member_status: string;
+  created_at: string;
+  workspace?: { name: string } | null;
+}
+
+interface Stats {
+  totalCustomers: number;
+  totalWorkspaces: number;
+  activeWorkspaces: number;
+  pendingInvites: number;
+  expiredCount: number;
+  expiringIn3Days: number;
+  expiringIn7Days: number;
+}
+
+export default function DashboardPage() {
+  const [customers, setCustomers] = useState<CustomerRow[]>([]);
+  const [stats, setStats] = useState<Stats>({
+    totalCustomers: 0,
+    totalWorkspaces: 0,
+    activeWorkspaces: 0,
+    pendingInvites: 0,
+    expiredCount: 0,
+    expiringIn3Days: 0,
+    expiringIn7Days: 0,
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      setLoading(true);
+      try {
+        const [custRes, wsRes] = await Promise.all([
+          fetch("/api/customers"),
+          fetch("/api/workspaces"),
+        ]);
+
+        const custData = await custRes.json();
+        const wsData = await wsRes.json();
+
+        const allCustomers: CustomerRow[] = custData.customers || [];
+        const workspaces = wsData.workspaces || [];
+
+        setCustomers(allCustomers);
+
+        let expiredCount = 0;
+        let expiringIn3Days = 0;
+        let expiringIn7Days = 0;
+
+        for (const c of allCustomers) {
+          const remaining = daysLeft(c.start_date, c.is_trial ?? false);
+          if (remaining < 0) expiredCount++;
+          else if (remaining <= 3) expiringIn3Days++;
+          else if (remaining <= 7) expiringIn7Days++;
+        }
+
+        const pendingInvites = allCustomers.filter(
+          (c) => c.member_status === "pending",
+        ).length;
+
+        setStats({
+          totalCustomers: allCustomers.length,
+          totalWorkspaces: workspaces.length,
+          activeWorkspaces: workspaces.filter(
+            (w: { status: string }) => w.status === "active",
+          ).length,
+          pendingInvites,
+          expiredCount,
+          expiringIn3Days,
+          expiringIn7Days,
+        });
+      } catch (err) {
+        console.error("Failed to fetch stats:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchStats();
+  }, []);
+
+  // Danh sách cảnh báo: hết hạn + sắp hết hạn (≤ 7 ngày)
+  const warningList = useMemo(() => {
+    return customers
+      .map((c) => ({
+        ...c,
+        remaining: daysLeft(c.start_date, c.is_trial ?? false),
+      }))
+      .filter((c) => c.remaining <= 7)
+      .sort((a, b) => a.remaining - b.remaining);
+  }, [customers]);
+
+  const copyRenewMessage = (c: CustomerRow) => {
+    const remaining = daysLeft(c.start_date, c.is_trial ?? false);
+    const expiryDate = formatDate(
+      expiryFromStart(c.start_date, c.is_trial ?? false),
+    );
+
+    let urgency: string;
+    if (remaining < 0) {
+      urgency = `đã hết hạn ${Math.abs(remaining)} ngày trước`;
+    } else if (remaining === 0) {
+      urgency = "hết hạn HÔM NAY";
+    } else {
+      urgency = `sẽ hết hạn sau ${remaining} ngày (${expiryDate})`;
+    }
+
+    const message = `Xin chào ${c.name},
+
+Tài khoản ChatGPT Business của bạn ${urgency}.
+
+📧 Email: ${c.email}
+📅 Ngày hết hạn: ${expiryDate}
+
+Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình nếu cần hỗ trợ nhé!
+
+— PremiumShop.tech`;
+
+    navigator.clipboard.writeText(message);
+    alert("Đã copy tin nhắn nhắc gia hạn!");
+  };
+
+  const handleDismissAlert = async (customerId: string) => {
+    try {
+      await fetch(`/api/customers/${customerId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_unknown: false }),
+      });
+      setCustomers((prev) =>
+        prev.map((c) =>
+          c.id === customerId ? { ...c, is_unknown: false } : c,
+        ),
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDismissAllAlerts = async () => {
+    const unknowns = customers.filter((c) => c.is_unknown);
+    try {
+      await Promise.all(
+        unknowns.map((c) =>
+          fetch(`/api/customers/${c.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ is_unknown: false }),
+          }),
+        ),
+      );
+      setCustomers((prev) => prev.map((c) => ({ ...c, is_unknown: false })));
+    } catch {
+      // ignore
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
+        <p className="text-muted-foreground">
+          Tổng quan về hệ thống ChatGPT Business
+        </p>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">
+              Tổng khách hàng
+            </CardTitle>
+            <Users className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{stats.totalCustomers}</div>
+            <p className="text-xs text-muted-foreground">Trong hệ thống</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Workspaces</CardTitle>
+            <Building2 className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {stats.activeWorkspaces}/{stats.totalWorkspaces}
+            </div>
+            <p className="text-xs text-muted-foreground">Đang hoạt động</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Chờ xác nhận</CardTitle>
+            <Clock className="h-4 w-4 text-blue-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-blue-600">
+              {stats.pendingInvites}
+            </div>
+            <p className="text-xs text-muted-foreground">Invite đang chờ</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Sắp hết hạn</CardTitle>
+            <AlertTriangle className="h-4 w-4 text-yellow-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-yellow-600">
+              {stats.expiringIn3Days}
+            </div>
+            <p className="text-xs text-muted-foreground">Trong 3 ngày tới</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Đã hết hạn</CardTitle>
+            <Ban className="h-4 w-4 text-red-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-red-600">
+              {stats.expiredCount}
+            </div>
+            <p className="text-xs text-muted-foreground">Cần gia hạn</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Security Alerts — Email lạ tự add vào workspace */}
+      {customers.filter((c) => c.is_unknown).length > 0 && (
+        <Card className="border-red-300 bg-red-50/50">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-lg text-red-700">
+                <ShieldAlert className="h-5 w-5" />
+                Cảnh báo bảo mật ({
+                  customers.filter((c) => c.is_unknown).length
+                }{" "}
+                email lạ)
+              </CardTitle>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDismissAllAlerts}
+              >
+                <Eye className="h-3 w-3 mr-1" />
+                Đã xem tất cả
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {customers
+                .filter((c) => c.is_unknown)
+                .map((c) => (
+                  <div
+                    key={c.id}
+                    className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-3"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <Badge variant="destructive" className="shrink-0">
+                        Lạ
+                      </Badge>
+                      <div className="min-w-0">
+                        <p className="font-medium truncate">{c.email}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {c.workspace?.name ?? "N/A"} ·{" "}
+                          {new Date(c.created_at).toLocaleDateString("vi-VN")}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="shrink-0 ml-2 text-muted-foreground"
+                      onClick={() => handleDismissAlert(c.id)}
+                    >
+                      <Eye className="h-3 w-3 mr-1" />
+                      Đã xem
+                    </Button>
+                  </div>
+                ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Expiry Warning List */}
+      {warningList.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <AlertTriangle className="h-5 w-5 text-yellow-500" />
+              Cảnh báo hết hạn ({warningList.length} khách)
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {warningList.map((c) => (
+                <div
+                  key={c.id}
+                  className="flex items-center justify-between rounded-lg border p-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    {c.remaining < 0 ? (
+                      <Badge variant="destructive" className="shrink-0">
+                        Hết hạn {Math.abs(c.remaining)}d
+                      </Badge>
+                    ) : c.remaining === 0 ? (
+                      <Badge
+                        variant="destructive"
+                        className="shrink-0 animate-pulse"
+                      >
+                        Hôm nay
+                      </Badge>
+                    ) : c.remaining <= 3 ? (
+                      <Badge className="shrink-0 bg-orange-500">
+                        Còn {c.remaining}d
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="secondary"
+                        className="shrink-0 bg-yellow-100 text-yellow-700"
+                      >
+                        Còn {c.remaining}d
+                      </Badge>
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-medium truncate">
+                        {c.name}
+                        {c.is_trial && (
+                          <span className="ml-1 text-xs text-orange-500">
+                            (Trial)
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {c.email} · {c.workspace?.name ?? "N/A"}
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 ml-2"
+                    onClick={() => copyRenewMessage(c)}
+                  >
+                    <Copy className="h-3 w-3 mr-1" />
+                    Nhắc gia hạn
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {warningList.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            Không có khách hàng nào sắp hết hạn trong 7 ngày tới
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
