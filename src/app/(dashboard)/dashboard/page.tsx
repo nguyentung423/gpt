@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,23 +8,27 @@ import {
   Users,
   Building2,
   AlertTriangle,
-  Clock,
   Loader2,
   Copy,
   Ban,
   ShieldAlert,
   Eye,
 } from "lucide-react";
-import { daysLeft, formatDate, expiryFromStart } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
 
-interface CustomerRow {
+interface WarningCustomer {
   id: string;
   name: string;
   email: string;
-  start_date: string;
-  is_trial?: boolean;
-  is_unknown?: boolean;
-  member_status: string;
+  is_trial: boolean;
+  expiry_date: string;
+  remaining: number;
+  workspace?: { name: string } | null;
+}
+
+interface UnknownCustomer {
+  id: string;
+  email: string;
   created_at: string;
   workspace?: { name: string } | null;
 }
@@ -33,22 +37,21 @@ interface Stats {
   totalCustomers: number;
   totalWorkspaces: number;
   activeWorkspaces: number;
-  pendingInvites: number;
   expiredCount: number;
+  expiringIn1Day: number;
   expiringIn3Days: number;
-  expiringIn7Days: number;
 }
 
 export default function DashboardPage() {
-  const [customers, setCustomers] = useState<CustomerRow[]>([]);
+  const [warningList, setWarningList] = useState<WarningCustomer[]>([]);
+  const [unknownList, setUnknownList] = useState<UnknownCustomer[]>([]);
   const [stats, setStats] = useState<Stats>({
     totalCustomers: 0,
     totalWorkspaces: 0,
     activeWorkspaces: 0,
-    pendingInvites: 0,
     expiredCount: 0,
+    expiringIn1Day: 0,
     expiringIn3Days: 0,
-    expiringIn7Days: 0,
   });
   const [loading, setLoading] = useState(true);
 
@@ -56,45 +59,23 @@ export default function DashboardPage() {
     const fetchStats = async () => {
       setLoading(true);
       try {
-        const [custRes, wsRes] = await Promise.all([
-          fetch("/api/customers"),
-          fetch("/api/workspaces"),
-        ]);
+        const res = await fetch("/api/dashboard");
+        const data = await res.json();
 
-        const custData = await custRes.json();
-        const wsData = await wsRes.json();
+        if (!res.ok) throw new Error(data.error || "Không thể tải dashboard");
 
-        const allCustomers: CustomerRow[] = custData.customers || [];
-        const workspaces = wsData.workspaces || [];
-
-        setCustomers(allCustomers);
-
-        let expiredCount = 0;
-        let expiringIn3Days = 0;
-        let expiringIn7Days = 0;
-
-        for (const c of allCustomers) {
-          const remaining = daysLeft(c.start_date, c.is_trial ?? false);
-          if (remaining < 0) expiredCount++;
-          else if (remaining <= 3) expiringIn3Days++;
-          else if (remaining <= 7) expiringIn7Days++;
-        }
-
-        const pendingInvites = allCustomers.filter(
-          (c) => c.member_status === "pending",
-        ).length;
-
-        setStats({
-          totalCustomers: allCustomers.length,
-          totalWorkspaces: workspaces.length,
-          activeWorkspaces: workspaces.filter(
-            (w: { status: string }) => w.status === "active",
-          ).length,
-          pendingInvites,
-          expiredCount,
-          expiringIn3Days,
-          expiringIn7Days,
-        });
+        setStats(
+          data.stats || {
+            totalCustomers: 0,
+            totalWorkspaces: 0,
+            activeWorkspaces: 0,
+            expiredCount: 0,
+            expiringIn1Day: 0,
+            expiringIn3Days: 0,
+          },
+        );
+        setWarningList(data.warningList || []);
+        setUnknownList(data.unknownList || []);
       } catch (err) {
         console.error("Failed to fetch stats:", err);
       } finally {
@@ -105,22 +86,9 @@ export default function DashboardPage() {
     fetchStats();
   }, []);
 
-  // Danh sách cảnh báo: hết hạn + sắp hết hạn (≤ 7 ngày)
-  const warningList = useMemo(() => {
-    return customers
-      .map((c) => ({
-        ...c,
-        remaining: daysLeft(c.start_date, c.is_trial ?? false),
-      }))
-      .filter((c) => c.remaining <= 7)
-      .sort((a, b) => a.remaining - b.remaining);
-  }, [customers]);
-
-  const copyRenewMessage = (c: CustomerRow) => {
-    const remaining = daysLeft(c.start_date, c.is_trial ?? false);
-    const expiryDate = formatDate(
-      expiryFromStart(c.start_date, c.is_trial ?? false),
-    );
+  const copyRenewMessage = (c: WarningCustomer) => {
+    const remaining = c.remaining;
+    const expiryDate = formatDate(c.expiry_date);
 
     let urgency: string;
     if (remaining < 0) {
@@ -153,18 +121,14 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_unknown: false }),
       });
-      setCustomers((prev) =>
-        prev.map((c) =>
-          c.id === customerId ? { ...c, is_unknown: false } : c,
-        ),
-      );
+      setUnknownList((prev) => prev.filter((c) => c.id !== customerId));
     } catch {
       // ignore
     }
   };
 
   const handleDismissAllAlerts = async () => {
-    const unknowns = customers.filter((c) => c.is_unknown);
+    const unknowns = unknownList;
     try {
       await Promise.all(
         unknowns.map((c) =>
@@ -175,7 +139,7 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
           }),
         ),
       );
-      setCustomers((prev) => prev.map((c) => ({ ...c, is_unknown: false })));
+      setUnknownList([]);
     } catch {
       // ignore
     }
@@ -228,14 +192,18 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Chờ xác nhận</CardTitle>
-            <Clock className="h-4 w-4 text-blue-500" />
+            <CardTitle className="text-sm font-medium">
+              Cảnh báo 1 ngày
+            </CardTitle>
+            <AlertTriangle className="h-4 w-4 text-orange-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-blue-600">
-              {stats.pendingInvites}
+            <div className="text-2xl font-bold text-orange-600">
+              {stats.expiringIn1Day}
             </div>
-            <p className="text-xs text-muted-foreground">Invite đang chờ</p>
+            <p className="text-xs text-muted-foreground">
+              Còn 1 ngày hoặc hôm nay
+            </p>
           </CardContent>
         </Card>
 
@@ -248,7 +216,7 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
             <div className="text-2xl font-bold text-yellow-600">
               {stats.expiringIn3Days}
             </div>
-            <p className="text-xs text-muted-foreground">Trong 3 ngày tới</p>
+            <p className="text-xs text-muted-foreground">Còn 2-3 ngày</p>
           </CardContent>
         </Card>
 
@@ -267,16 +235,13 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
       </div>
 
       {/* Security Alerts — Email lạ tự add vào workspace */}
-      {customers.filter((c) => c.is_unknown).length > 0 && (
+      {unknownList.length > 0 && (
         <Card className="border-red-300 bg-red-50/50">
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="flex items-center gap-2 text-lg text-red-700">
                 <ShieldAlert className="h-5 w-5" />
-                Cảnh báo bảo mật ({
-                  customers.filter((c) => c.is_unknown).length
-                }{" "}
-                email lạ)
+                Cảnh báo bảo mật ({unknownList.length} email lạ)
               </CardTitle>
               <Button
                 variant="outline"
@@ -290,36 +255,34 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {customers
-                .filter((c) => c.is_unknown)
-                .map((c) => (
-                  <div
-                    key={c.id}
-                    className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-3"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <Badge variant="destructive" className="shrink-0">
-                        Lạ
-                      </Badge>
-                      <div className="min-w-0">
-                        <p className="font-medium truncate">{c.email}</p>
-                        <p className="text-xs text-muted-foreground truncate">
-                          {c.workspace?.name ?? "N/A"} ·{" "}
-                          {new Date(c.created_at).toLocaleDateString("vi-VN")}
-                        </p>
-                      </div>
+              {unknownList.map((c) => (
+                <div
+                  key={c.id}
+                  className="flex items-center justify-between rounded-lg border border-red-200 bg-white p-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Badge variant="destructive" className="shrink-0">
+                      Lạ
+                    </Badge>
+                    <div className="min-w-0">
+                      <p className="font-medium truncate">{c.email}</p>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {c.workspace?.name ?? "N/A"} ·{" "}
+                        {new Date(c.created_at).toLocaleDateString("vi-VN")}
+                      </p>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="shrink-0 ml-2 text-muted-foreground"
-                      onClick={() => handleDismissAlert(c.id)}
-                    >
-                      <Eye className="h-3 w-3 mr-1" />
-                      Đã xem
-                    </Button>
                   </div>
-                ))}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 ml-2 text-muted-foreground"
+                    onClick={() => handleDismissAlert(c.id)}
+                  >
+                    <Eye className="h-3 w-3 mr-1" />
+                    Đã xem
+                  </Button>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>
@@ -398,7 +361,7 @@ Vui lòng gia hạn để tiếp tục sử dụng dịch vụ. Liên hệ mình
       {warningList.length === 0 && (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
-            Không có khách hàng nào sắp hết hạn trong 7 ngày tới
+            Không có khách hàng nào sắp hết hạn trong 3 ngày tới
           </CardContent>
         </Card>
       )}

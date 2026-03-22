@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { verifyCredentials } from "@/lib/chatgpt-business";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -16,6 +15,7 @@ export async function GET(_request: Request, { params }: Params) {
       .from("workspaces")
       .select("*")
       .eq("id", id)
+      .is("deleted_at", null)
       .single();
 
     if (error || !workspace) {
@@ -29,7 +29,8 @@ export async function GET(_request: Request, { params }: Params) {
     const { count: customerCount } = await supabase
       .from("customers")
       .select("*", { count: "exact", head: true })
-      .eq("workspace_id", id);
+      .eq("workspace_id", id)
+      .is("deleted_at", null);
 
     return NextResponse.json({
       workspace: {
@@ -51,7 +52,7 @@ export async function GET(_request: Request, { params }: Params) {
   }
 }
 
-// PATCH /api/workspaces/[id] - Update workspace (name, status, or tokens)
+// PATCH /api/workspaces/[id] - Update workspace (manual fields only)
 export async function PATCH(request: Request, { params }: Params) {
   try {
     const { id } = await params;
@@ -59,81 +60,83 @@ export async function PATCH(request: Request, { params }: Params) {
 
     const supabase = await createServerClient();
 
-    // If session_json is provided, parse tokens from it and reactivate
-    if (body.session_json) {
-      let parsed;
-      try {
-        parsed =
-          typeof body.session_json === "string"
-            ? JSON.parse(body.session_json)
-            : body.session_json;
-      } catch {
+    // Normal update (name / account_id / registration_date / status / note)
+    const updateData: Record<string, string | null> = {};
+
+    const safeName = typeof body.name === "string" ? body.name.trim() : "";
+    const safeAccountId =
+      typeof body.accountId === "string" ? body.accountId.trim() : "";
+    const safeRegistrationDate =
+      typeof body.registrationDate === "string"
+        ? body.registrationDate.trim()
+        : "";
+
+    if (body.name !== undefined) {
+      if (!safeName) {
         return NextResponse.json(
-          { error: "JSON session không hợp lệ" },
+          { error: "Tên workspace không được để trống" },
+          { status: 400 },
+        );
+      }
+      updateData.name = safeName;
+    }
+
+    if (body.accountId !== undefined) {
+      if (!safeAccountId) {
+        return NextResponse.json(
+          { error: "Account ID không được để trống" },
           { status: 400 },
         );
       }
 
-      const accessToken = parsed.accessToken;
-      const sessionToken =
-        parsed.sessionToken ||
-        parsed["__Secure-next-auth.session-token"] ||
-        parsed.session_token;
+      const { data: existing, error: existingError } = await supabase
+        .from("workspaces")
+        .select("id, name")
+        .eq("account_id", safeAccountId)
+        .is("deleted_at", null)
+        .neq("id", id)
+        .maybeSingle();
 
-      if (!accessToken || !sessionToken) {
-        return NextResponse.json(
-          { error: "Thiếu accessToken hoặc sessionToken trong JSON" },
-          { status: 400 },
-        );
-      }
+      if (existingError) throw existingError;
 
-      // Verify credentials trước khi lưu
-      const verification = await verifyCredentials({
-        accessToken,
-        sessionToken,
-      });
-      if (!verification.valid) {
+      if (existing) {
         return NextResponse.json(
           {
-            error: `Token không hợp lệ: ${verification.error || "Không thể xác minh"}`,
+            error: `Account ID đã được dùng bởi workspace "${existing.name}"`,
           },
           { status: 400 },
         );
       }
 
-      const { data: workspace, error } = await supabase
-        .from("workspaces")
-        .update({
-          access_token: accessToken,
-          session_token: sessionToken,
-          status: "active",
-        })
-        .eq("id", id)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      return NextResponse.json({
-        success: true,
-        workspace: {
-          ...workspace,
-          access_token: "***hidden***",
-          session_token: "***hidden***",
-        },
-      });
+      updateData.account_id = safeAccountId;
     }
 
-    // Normal update (name / status / note)
-    const updateData: Record<string, string | null> = {};
-    if (body.name) updateData.name = body.name;
+    if (body.registrationDate !== undefined) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(safeRegistrationDate)) {
+        return NextResponse.json(
+          { error: "Ngày đăng ký workspace không hợp lệ" },
+          { status: 400 },
+        );
+      }
+
+      updateData.created_at = `${safeRegistrationDate}T00:00:00.000Z`;
+    }
+
     if (body.status) updateData.status = body.status;
     if (body.note !== undefined) updateData.note = body.note || null;
+
+    if (Object.keys(updateData).length === 0) {
+      return NextResponse.json(
+        { error: "Không có field hợp lệ để cập nhật" },
+        { status: 400 },
+      );
+    }
 
     const { data: workspace, error } = await supabase
       .from("workspaces")
       .update(updateData)
       .eq("id", id)
+      .is("deleted_at", null)
       .select()
       .single();
 
@@ -159,32 +162,35 @@ export async function PATCH(request: Request, { params }: Params) {
   }
 }
 
-// DELETE /api/workspaces/[id] - Delete workspace
+// DELETE /api/workspaces/[id] - Soft delete workspace and active customers
 export async function DELETE(_request: Request, { params }: Params) {
   try {
     const { id } = await params;
     const supabase = await createServerClient();
 
-    // Check if there are customers
-    const { count } = await supabase
+    const deletedAt = new Date().toISOString();
+
+    const { error: deleteWorkspaceError } = await supabase
+      .from("workspaces")
+      .update({ deleted_at: deletedAt })
+      .eq("id", id)
+      .is("deleted_at", null);
+
+    if (deleteWorkspaceError) throw deleteWorkspaceError;
+
+    const { error: deleteCustomersError } = await supabase
       .from("customers")
-      .select("*", { count: "exact", head: true })
-      .eq("workspace_id", id);
+      .update({ deleted_at: deletedAt })
+      .eq("workspace_id", id)
+      .is("deleted_at", null);
 
-    if (count && count > 0) {
-      return NextResponse.json(
-        {
-          error: `Không thể xóa workspace có ${count} khách hàng. Hãy chuyển khách hàng sang workspace khác trước.`,
-        },
-        { status: 400 },
-      );
-    }
+    if (deleteCustomersError) throw deleteCustomersError;
 
-    const { error } = await supabase.from("workspaces").delete().eq("id", id);
-
-    if (error) throw error;
-
-    return NextResponse.json({ success: true, deleted: true });
+    return NextResponse.json({
+      success: true,
+      deleted: true,
+      soft: true,
+    });
   } catch (error) {
     console.error("Failed to delete workspace:", error);
     return NextResponse.json(

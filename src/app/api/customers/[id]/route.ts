@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { removeUser } from "@/lib/chatgpt-business";
-import { expiryFromStart } from "@/lib/utils";
+import { expiryFromStart, todayStr } from "@/lib/utils";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -18,10 +17,11 @@ export async function GET(_request: Request, { params }: Params) {
       .select(
         `
         *,
-        workspace:workspaces(id, name, status)
+        workspace:workspaces(id, name, account_id, status, created_at)
       `,
       )
       .eq("id", id)
+      .is("deleted_at", null)
       .single();
 
     if (error || !customer) {
@@ -81,28 +81,46 @@ export async function PATCH(request: Request, { params }: Params) {
       safeUpdates.email = (safeUpdates.email as string).toLowerCase();
     }
 
-    // Nếu cần tính lại expiry_date (khi thay đổi start_date hoặc is_trial)
-    const needsRecalc =
+    // Rule trial:
+    // - Bật/tắt trial => reset còn lại ngay lập tức (35/30 ngày)
+    // - Đổi start_date => tính lại hạn theo trạng thái trial hiện tại
+    const needCurrentRow =
       safeUpdates.start_date !== undefined ||
       safeUpdates.is_trial !== undefined;
 
-    if (needsRecalc) {
-      // Fetch current record để lấy giá trị hiện tại
+    if (needCurrentRow) {
       const { data: current } = await supabase
         .from("customers")
-        .select("start_date, is_trial")
+        .select("start_date, is_trial, expiry_date")
         .eq("id", id)
+        .is("deleted_at", null)
         .single();
 
       const startDate =
-        (safeUpdates.start_date as string) || current?.start_date;
-      const isTrial =
+        safeUpdates.start_date !== undefined
+          ? (safeUpdates.start_date as string)
+          : current?.start_date;
+
+      const currentIsTrial = current?.is_trial ?? false;
+      const nextIsTrial =
         safeUpdates.is_trial !== undefined
           ? (safeUpdates.is_trial as boolean)
-          : (current?.is_trial ?? false);
+          : currentIsTrial;
 
-      if (startDate) {
-        safeUpdates.expiry_date = expiryFromStart(startDate, isTrial);
+      const startChanged = safeUpdates.start_date !== undefined;
+      const trialChanged = safeUpdates.is_trial !== undefined;
+
+      if (trialChanged) {
+        // Toggle trial should immediately reset remaining days.
+        const resetStart =
+          safeUpdates.start_date !== undefined
+            ? (safeUpdates.start_date as string)
+            : todayStr();
+
+        safeUpdates.start_date = resetStart;
+        safeUpdates.expiry_date = expiryFromStart(resetStart, nextIsTrial);
+      } else if (startDate && startChanged) {
+        safeUpdates.expiry_date = expiryFromStart(startDate, nextIsTrial);
       }
     }
 
@@ -110,6 +128,7 @@ export async function PATCH(request: Request, { params }: Params) {
       .from("customers")
       .update(safeUpdates)
       .eq("id", id)
+      .is("deleted_at", null)
       .select()
       .single();
 
@@ -128,55 +147,21 @@ export async function PATCH(request: Request, { params }: Params) {
   }
 }
 
-// DELETE /api/customers/[id] - Delete customer + remove from ChatGPT workspace
+// DELETE /api/customers/[id] - Soft delete customer (move to trash)
 export async function DELETE(_request: Request, { params }: Params) {
   try {
     const { id } = await params;
     const supabase = await createServerClient();
 
-    // Get customer with workspace tokens before deleting
-    const { data: customer } = await supabase
+    const { error } = await supabase
       .from("customers")
-      .select(
-        `
-        id,
-        openai_user_id,
-        email,
-        workspace:workspaces(id, access_token, session_token, account_id)
-      `,
-      )
+      .update({ deleted_at: new Date().toISOString() })
       .eq("id", id)
-      .single();
-
-    // Try to remove from ChatGPT workspace first
-    if (customer?.openai_user_id && customer?.workspace) {
-      const wsRaw = customer.workspace as unknown;
-      const ws = (Array.isArray(wsRaw) ? wsRaw[0] : wsRaw) as Record<
-        string,
-        string
-      >;
-      if (ws?.access_token && ws?.session_token && ws?.account_id) {
-        try {
-          await removeUser(
-            { accessToken: ws.access_token, sessionToken: ws.session_token },
-            ws.account_id,
-            customer.openai_user_id,
-          );
-        } catch (removeErr) {
-          console.error(
-            "Failed to remove from ChatGPT workspace (continuing with DB delete):",
-            removeErr,
-          );
-        }
-      }
-    }
-
-    // Delete from database
-    const { error } = await supabase.from("customers").delete().eq("id", id);
+      .is("deleted_at", null);
 
     if (error) throw error;
 
-    return NextResponse.json({ success: true, deleted: true });
+    return NextResponse.json({ success: true, deleted: true, soft: true });
   } catch (error) {
     console.error("Failed to delete customer:", error);
     return NextResponse.json(

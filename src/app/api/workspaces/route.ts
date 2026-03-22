@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { verifyCredentials, listAccountUsers } from "@/lib/chatgpt-business";
-import { todayStr, expiryFromStart } from "@/lib/utils";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 // GET /api/workspaces - List all workspaces
 export async function GET() {
@@ -11,6 +12,7 @@ export async function GET() {
     const { data: workspaces, error } = await supabase
       .from("workspaces")
       .select("*")
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -35,26 +37,20 @@ export async function GET() {
   }
 }
 
-// POST /api/workspaces - Create workspace from ChatGPT session data
+// POST /api/workspaces - Create workspace manually
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { accessToken, sessionToken, accountId, organizationId, name } = body;
+    const { name, accountId, registrationDate, status } = body;
 
-    if (!accessToken || !sessionToken || !accountId) {
+    const safeName = typeof name === "string" ? name.trim() : "";
+    const safeAccountId = typeof accountId === "string" ? accountId.trim() : "";
+    const safeRegistrationDate =
+      typeof registrationDate === "string" ? registrationDate.trim() : "";
+
+    if (!safeAccountId) {
       return NextResponse.json(
-        { error: "accessToken, sessionToken, và accountId là bắt buộc" },
-        { status: 400 },
-      );
-    }
-
-    const creds = { accessToken, sessionToken };
-
-    // Verify credentials work
-    const verification = await verifyCredentials(creds);
-    if (!verification.valid) {
-      return NextResponse.json(
-        { error: verification.error || "Token không hợp lệ hoặc đã hết hạn" },
+        { error: "accountId là bắt buộc" },
         { status: 400 },
       );
     }
@@ -62,67 +58,47 @@ export async function POST(request: Request) {
     const supabase = await createServerClient();
 
     // Check if workspace with same account_id already exists
-    const { data: existing } = await supabase
+    const { data: existing, error: existingError } = await supabase
       .from("workspaces")
-      .select("id, name")
-      .eq("account_id", accountId)
-      .single();
+      .select("id, name, deleted_at")
+      .eq("account_id", safeAccountId)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
 
     if (existing) {
       return NextResponse.json(
         {
-          error: `Workspace "${existing.name}" đã tồn tại với Account này`,
+          error: existing.deleted_at
+            ? `Workspace "${existing.name}" đang nằm trong thùng rác. Hãy khôi phục thay vì tạo mới.`
+            : `Workspace "${existing.name}" đã tồn tại với Account này`,
         },
         { status: 400 },
       );
     }
 
-    // Create workspace
-    const workspaceName =
-      name || verification.name || "ChatGPT Business Workspace";
+    // Create workspace with manually entered data.
+    const safeStatus = status === "dead" ? "dead" : "active";
+    const createdAt = safeRegistrationDate
+      ? `${safeRegistrationDate}T00:00:00.000Z`
+      : undefined;
     const { data: workspace, error } = await supabase
       .from("workspaces")
       .insert({
-        name: workspaceName,
-        access_token: accessToken,
-        session_token: sessionToken,
-        account_id: accountId,
-        org_id: organizationId || "",
-        status: "active",
+        // Keep account_id as identity, while allowing optional display name.
+        name: safeName || safeAccountId,
+        access_token: "",
+        session_token: "",
+        account_id: safeAccountId,
+        org_id: "",
+        note: null,
+        status: safeStatus,
+        ...(createdAt ? { created_at: createdAt } : {}),
       })
       .select()
       .single();
 
     if (error) throw error;
-
-    // Auto-import members from ChatGPT Business
-    let importedCount = 0;
-    try {
-      const users = await listAccountUsers(creds, accountId);
-
-      for (const user of users) {
-        // Skip the account owner (admin)
-        if (user.role === "account-owner") continue;
-
-        const startDate = todayStr();
-
-        const { error: upsertErr } = await supabase.from("customers").upsert(
-          {
-            name: user.name || user.email.split("@")[0],
-            email: user.email.toLowerCase(),
-            workspace_id: workspace.id,
-            openai_user_id: user.id,
-            member_status: user.deactivated_time ? "removed" : "active",
-            start_date: startDate,
-            expiry_date: expiryFromStart(startDate),
-          },
-          { onConflict: "email,workspace_id", ignoreDuplicates: true },
-        );
-        if (!upsertErr) importedCount++;
-      }
-    } catch (importErr) {
-      console.error("Auto-import failed (workspace still created):", importErr);
-    }
 
     return NextResponse.json({
       success: true,
@@ -131,7 +107,6 @@ export async function POST(request: Request) {
         access_token: "***hidden***",
         session_token: "***hidden***",
       },
-      importedMembers: importedCount,
     });
   } catch (error) {
     console.error("Failed to create workspace:", error);

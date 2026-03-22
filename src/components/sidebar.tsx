@@ -7,9 +7,10 @@ import { Button } from "@/components/ui/button";
 import {
   LayoutDashboard,
   Users,
-  Building2,
   LogOut,
   Sparkles,
+  Trash2,
+  Database,
 } from "lucide-react";
 
 const navItems = [
@@ -24,13 +25,23 @@ const navItems = [
     icon: Users,
   },
   {
-    title: "Workspaces",
-    href: "/workspaces",
-    icon: Building2,
+    title: "Data",
+    href: "/data",
+    icon: Database,
+  },
+  {
+    title: "Thùng rác",
+    href: "/trash",
+    icon: Trash2,
   },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  mobile?: boolean;
+  onNavigate?: () => void;
+}
+
+export function Sidebar({ mobile = false, onNavigate }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -42,7 +53,12 @@ export function Sidebar() {
   };
 
   return (
-    <div className="flex h-screen w-64 flex-col border-r bg-sidebar">
+    <div
+      className={cn(
+        "flex flex-col bg-sidebar",
+        mobile ? "h-full w-full" : "h-screen w-64 border-r",
+      )}
+    >
       {/* Logo */}
       <div className="flex h-16 items-center gap-2 border-b px-6">
         <Sparkles className="h-6 w-6 text-primary" />
@@ -57,6 +73,7 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={() => onNavigate?.()}
               className={cn(
                 "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                 isActive

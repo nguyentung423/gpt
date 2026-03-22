@@ -14,6 +14,7 @@ export interface Workspace {
   status: WorkspaceStatus;
   note: string | null; // Ghi chú workspace
   created_at: string; // ISO timestamp
+  deleted_at: string | null;
 }
 
 export interface Customer {
@@ -24,13 +25,19 @@ export interface Customer {
   openai_user_id: string | null; // OpenAI user ID (after accepted invite)
   member_status: MemberStatus; // Status in OpenAI org
   start_date: string; // ISO date string "YYYY-MM-DD" (ngày mua, hết hạn = +30 ngày)
+  expiry_date: string;
   is_trial: boolean; // Khách dùng thử
   is_unknown: boolean; // Email lạ tự add vào workspace
+  note: string | null;
   created_at: string; // ISO timestamp
+  deleted_at: string | null;
 }
 
 // ─── Joined / View types ──────────────────────────────────────────
 
 export interface CustomerWithWorkspace extends Customer {
-  workspace: Pick<Workspace, "id" | "name" | "status"> | null;
+  workspace: Pick<
+    Workspace,
+    "id" | "name" | "account_id" | "status" | "created_at"
+  > | null;
 }

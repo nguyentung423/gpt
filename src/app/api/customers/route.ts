@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { inviteUser } from "@/lib/chatgpt-business";
 import { todayStr, expiryFromStart } from "@/lib/utils";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 // GET /api/customers - List all customers with workspace info
 export async function GET() {
@@ -13,9 +15,10 @@ export async function GET() {
       .select(
         `
         *,
-        workspace:workspaces(id, name, status)
+        workspace:workspaces(id, name, account_id, status, created_at)
       `,
       )
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -47,6 +50,20 @@ export async function POST(request: Request) {
 
     const supabase = await createServerClient();
 
+    const { data: workspace, error: workspaceError } = await supabase
+      .from("workspaces")
+      .select("id")
+      .eq("id", workspace_id)
+      .is("deleted_at", null)
+      .single();
+
+    if (workspaceError || !workspace) {
+      return NextResponse.json(
+        { error: "Workspace không tồn tại hoặc đã bị ẩn" },
+        { status: 400 },
+      );
+    }
+
     // start_date = ngày mua (user chọn hoặc mặc định hôm nay)
     const purchaseDate = start_date || todayStr();
 
@@ -67,38 +84,9 @@ export async function POST(request: Request) {
 
     if (error) throw error;
 
-    // Auto-send invite to ChatGPT Business workspace
-    let inviteResult: { success: boolean; error?: string } = { success: false };
-    try {
-      const { data: workspace } = await supabase
-        .from("workspaces")
-        .select("access_token, session_token, account_id")
-        .eq("id", workspace_id)
-        .single();
-
-      if (workspace?.access_token && workspace?.session_token) {
-        inviteResult = await inviteUser(
-          {
-            accessToken: workspace.access_token,
-            sessionToken: workspace.session_token,
-          },
-          workspace.account_id,
-          email,
-        );
-      }
-    } catch (inviteErr) {
-      console.error("Auto-invite failed:", inviteErr);
-    }
-
     return NextResponse.json({
       success: true,
       customer,
-      invited: inviteResult.success,
-      inviteError: inviteResult.error
-        ? typeof inviteResult.error === "string"
-          ? inviteResult.error
-          : JSON.stringify(inviteResult.error)
-        : null,
     });
   } catch (error) {
     console.error("Failed to create customer:", error);
